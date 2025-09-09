@@ -5,16 +5,22 @@ import time
 from scipy import signal
 from scipy.fft import fft
 import tkinter as tk
-from tkinter import ttk, messagebox, filedialog
+from tkinter import ttk, messagebox, filedialog, scrolledtext
 from PIL import Image, ImageTk
+import threading
+import queue
 import matplotlib.pyplot as plt
 from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
 from matplotlib.animation import FuncAnimation
 from collections import deque
+import math
 from datetime import datetime
 import io
+import base64
+import json
+import requests
 
-# PDF generation libraries - REQUIRED for this version
+# PDF generation libraries
 try:
     from reportlab.lib.pagesizes import letter, A4
     from reportlab.platypus import (
@@ -36,6 +42,225 @@ except ImportError:
     print("ERROR: ReportLab is required for PDF generation!")
     print("Install with: pip install reportlab")
 
+# Gemini API integration
+try:
+    import google.generativeai as genai
+
+    GEMINI_AVAILABLE = True
+except ImportError:
+    GEMINI_AVAILABLE = False
+    print("WARNING: Google Generative AI library not found!")
+    print("Install with: pip install google-generativeai")
+
+
+class GeminiHealthAnalyzer:
+    """AI-powered health analysis using Gemini 2.5 Flash"""
+
+    def __init__(self, api_key=None):
+        self.api_key = api_key
+        self.model = None
+        self.configured = False
+
+        if GEMINI_AVAILABLE and api_key:
+            try:
+                genai.configure(api_key=api_key)
+                self.model = genai.GenerativeModel("gemini-2.0-flash-exp")
+                self.configured = True
+                print("Gemini AI initialized successfully!")
+            except Exception as e:
+                print(f"Error initializing Gemini: {e}")
+                self.configured = False
+
+    def analyze_health_data(self, health_metrics, face_image=None):
+        """Analyze health data and provide AI suggestions"""
+        if not self.configured:
+            return self._get_fallback_suggestions(health_metrics)
+
+        try:
+            # Prepare the analysis prompt
+            prompt = self._create_health_analysis_prompt(health_metrics)
+
+            # If face image is provided, include it in the analysis
+            if face_image is not None:
+                # Convert OpenCV image to PIL
+                if isinstance(face_image, np.ndarray):
+                    face_image_pil = Image.fromarray(
+                        cv2.cvtColor(face_image, cv2.COLOR_BGR2RGB)
+                    )
+                else:
+                    face_image_pil = face_image
+
+                response = self.model.generate_content([prompt, face_image_pil])
+            else:
+                response = self.model.generate_content(prompt)
+
+            return self._parse_ai_response(response.text)
+
+        except Exception as e:
+            print(f"Error getting AI analysis: {e}")
+            return self._get_fallback_suggestions(health_metrics)
+
+    def _create_health_analysis_prompt(self, metrics):
+        """Create a comprehensive prompt for health analysis"""
+        prompt = f"""
+As an AI health advisor, analyze the following health monitoring data and provide personalized recommendations:
+
+HEALTH METRICS:
+- Heart Rate: {metrics['heart_rate']} bpm
+- Breathing Rate: {metrics['breathing_rate']} rpm  
+- Blood Pressure: {metrics['blood_pressure_sys']}/{metrics['blood_pressure_dia']} mmHg
+- Heart Rate Variability (HRV): {metrics['hrv']} ms
+- Stress Index: {metrics['stress_index']} (0-1 scale)
+- Parasympathetic Activity: {metrics['parasympathetic']}%
+- Overall Wellness Score: {metrics['wellness_score']}/100
+
+ANALYSIS REQUIREMENTS:
+1. Provide a comprehensive health assessment based on these metrics
+2. Identify any concerning patterns or abnormal values
+3. Give specific, actionable recommendations for improvement
+4. Suggest lifestyle modifications, exercises, or habits
+5. Indicate if medical consultation is recommended
+6. Provide encouragement and positive reinforcement where appropriate
+
+RESPONSE FORMAT:
+Please structure your response as:
+**HEALTH STATUS SUMMARY:**
+[Overall assessment in 2-3 sentences]
+
+**KEY FINDINGS:**
+[Bullet points of important observations]
+
+**PERSONALIZED RECOMMENDATIONS:**
+[Specific actionable advice organized by category]
+
+**MEDICAL ADVICE:**
+[Any recommendations for professional consultation]
+
+**WELLNESS TIPS:**
+[Additional tips for maintaining good health]
+
+Please be supportive, informative, and focus on actionable advice. Avoid being overly alarming but don't downplay genuine health concerns.
+        """
+        return prompt
+
+    def _parse_ai_response(self, response_text):
+        """Parse and format the AI response"""
+        try:
+            # Clean up the response
+            formatted_response = response_text.strip()
+
+            # Add some basic formatting if needed
+            if "**" not in formatted_response:
+                # If no markdown formatting, add some basic structure
+                lines = formatted_response.split("\n")
+                formatted_lines = []
+                for line in lines:
+                    if line.strip():
+                        if any(
+                            keyword in line.lower()
+                            for keyword in [
+                                "summary",
+                                "findings",
+                                "recommendations",
+                                "medical",
+                                "wellness",
+                                "tips",
+                            ]
+                        ):
+                            formatted_lines.append(f"**{line.strip()}**")
+                        else:
+                            formatted_lines.append(line.strip())
+                formatted_response = "\n".join(formatted_lines)
+
+            return {
+                "status": "success",
+                "analysis": formatted_response,
+                "source": "Gemini AI",
+            }
+
+        except Exception as e:
+            print(f"Error parsing AI response: {e}")
+            return {
+                "status": "error",
+                "analysis": "Error processing AI response. Please try again.",
+                "source": "Error",
+            }
+
+    def _get_fallback_suggestions(self, metrics):
+        """Provide fallback suggestions when AI is not available"""
+        hr = metrics["heart_rate"]
+        stress = metrics["stress_index"]
+        hrv = metrics["hrv"]
+        wellness = metrics["wellness_score"]
+
+        suggestions = []
+        suggestions.append("**HEALTH STATUS SUMMARY:**")
+
+        if wellness > 70:
+            suggestions.append(
+                "Your overall wellness metrics appear to be in good range. Continue maintaining your current health habits."
+            )
+        elif wellness > 50:
+            suggestions.append(
+                "Your health metrics show room for improvement. Focus on the recommendations below."
+            )
+        else:
+            suggestions.append(
+                "Several health metrics indicate areas that need attention. Consider implementing the suggested improvements."
+            )
+
+        suggestions.append("\n**KEY FINDINGS:**")
+
+        if 60 <= hr <= 100:
+            suggestions.append("• Heart rate is within normal range")
+        elif hr > 100:
+            suggestions.append(
+                "• Elevated heart rate detected - may indicate stress or physical activity"
+            )
+        else:
+            suggestions.append("• Lower than normal heart rate detected")
+
+        if stress < 0.3:
+            suggestions.append("• Low stress levels detected - good stress management")
+        elif stress > 0.7:
+            suggestions.append(
+                "• High stress levels detected - stress reduction recommended"
+            )
+
+        if hrv > 40:
+            suggestions.append(
+                "• Good heart rate variability - healthy autonomic function"
+            )
+        elif hrv < 20:
+            suggestions.append(
+                "• Low HRV - may benefit from stress reduction and exercise"
+            )
+
+        suggestions.append("\n**PERSONALIZED RECOMMENDATIONS:**")
+        suggestions.append("• Maintain regular exercise routine (150 minutes/week)")
+        suggestions.append("• Practice stress management techniques")
+        suggestions.append("• Ensure adequate sleep (7-9 hours)")
+        suggestions.append("• Stay hydrated and eat balanced meals")
+
+        if stress > 0.5:
+            suggestions.append("• Consider meditation or relaxation techniques")
+            suggestions.append("• Limit caffeine intake")
+
+        suggestions.append("\n**MEDICAL ADVICE:**")
+        if hr < 50 or hr > 120:
+            suggestions.append(
+                "• Consider consulting a healthcare provider about heart rate"
+            )
+
+        suggestions.append("• This is for educational purposes only")
+        suggestions.append("• Consult healthcare professionals for medical concerns")
+
+        return {
+            "status": "fallback",
+            "analysis": "\n".join(suggestions),
+            "source": "Built-in Analysis",
+        }
+
 
 class FaceVitalMonitor:
     def __init__(self):
@@ -49,8 +274,13 @@ class FaceVitalMonitor:
             exit()
 
         self.root = tk.Tk()
-        self.root.title("Face Vital - Health Monitor (PDF Reports)")
-        self.root.geometry("1600x1000")
+        self.root.title("Face Vital - Health Monitor with AI Suggestions")
+        self.root.geometry("1800x1000")
+
+        # Initialize Gemini AI analyzer
+        self.gemini_analyzer = None
+        self.ai_suggestions = ""
+        self.current_face_image = None
 
         # Initialize MediaPipe face detection
         self.mp_face_mesh = mp.solutions.face_mesh
@@ -143,7 +373,24 @@ class FaceVitalMonitor:
         )
         self.stop_btn.pack(side=tk.LEFT, padx=5)
 
-        # PDF Report button - ONLY export option
+        # AI Configuration button
+        self.ai_config_btn = ttk.Button(
+            button_frame,
+            text="Configure AI",
+            command=self.show_ai_config_dialog,
+        )
+        self.ai_config_btn.pack(side=tk.LEFT, padx=5)
+
+        # Get AI Suggestions button
+        self.ai_suggest_btn = ttk.Button(
+            button_frame,
+            text="Get AI Suggestions",
+            command=self.get_ai_suggestions,
+            state=tk.DISABLED,
+        )
+        self.ai_suggest_btn.pack(side=tk.LEFT, padx=5)
+
+        # PDF Report button
         self.pdf_btn = ttk.Button(
             button_frame,
             text="Generate PDF Report",
@@ -162,6 +409,12 @@ class FaceVitalMonitor:
         )
         self.progress_label.pack(pady=5)
 
+        # AI Status label
+        self.ai_status_label = ttk.Label(
+            video_frame, text="AI: Not configured", foreground="orange"
+        )
+        self.ai_status_label.pack(pady=2)
+
         # Right side - Results and graphs
         right_frame = ttk.Frame(main_paned)
         main_paned.add(right_frame, weight=2)
@@ -178,11 +431,324 @@ class FaceVitalMonitor:
         signals_frame = ttk.Frame(notebook)
         notebook.add(signals_frame, text="Raw Signals")
 
+        # AI Suggestions tab
+        ai_frame = ttk.Frame(notebook)
+        notebook.add(ai_frame, text="AI Health Suggestions")
+
         self.setup_metrics_tab(metrics_frame)
         self.setup_signals_tab(signals_frame)
+        self.setup_ai_tab(ai_frame)
 
         # Start video feed
         self.update_video()
+
+    def setup_ai_tab(self, parent):
+        """Setup the AI suggestions tab"""
+        # Create main frame with scrollbar
+        main_frame = ttk.Frame(parent)
+        main_frame.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
+
+        # Title
+        title_label = ttk.Label(
+            main_frame,
+            text="AI-Powered Health Analysis & Suggestions",
+            font=("Arial", 14, "bold"),
+        )
+        title_label.pack(pady=(0, 10))
+
+        # Control frame
+        control_frame = ttk.Frame(main_frame)
+        control_frame.pack(fill=tk.X, pady=(0, 10))
+
+        # Refresh suggestions button
+        self.refresh_ai_btn = ttk.Button(
+            control_frame,
+            text="🔄 Refresh AI Analysis",
+            command=self.get_ai_suggestions,
+            state=tk.DISABLED,
+        )
+        self.refresh_ai_btn.pack(side=tk.LEFT, padx=(0, 10))
+
+        # AI provider label
+        self.ai_provider_label = ttk.Label(
+            control_frame,
+            text="Powered by: Not configured",
+            font=("Arial", 9),
+            foreground="gray",
+        )
+        self.ai_provider_label.pack(side=tk.RIGHT)
+
+        # Suggestions text area with scrollbar
+        suggestions_frame = ttk.LabelFrame(
+            main_frame, text="AI Health Analysis", padding="10"
+        )
+        suggestions_frame.pack(fill=tk.BOTH, expand=True)
+
+        self.ai_suggestions_text = scrolledtext.ScrolledText(
+            suggestions_frame,
+            wrap=tk.WORD,
+            width=60,
+            height=25,
+            font=("Arial", 11),
+            bg="#f8f9fa",
+            fg="#2c3e50",
+        )
+        self.ai_suggestions_text.pack(fill=tk.BOTH, expand=True)
+
+        # Default message
+        default_message = """
+🤖 AI Health Analysis
+
+Welcome to AI-powered health insights!
+
+To get started:
+1. Click 'Configure AI' to set up your Gemini API key
+2. Complete a 30-second health monitoring session
+3. Click 'Get AI Suggestions' for personalized recommendations
+
+The AI will analyze your:
+• Heart rate patterns
+• Breathing patterns  
+• Stress levels
+• Heart rate variability
+• Blood pressure estimates
+• Overall wellness metrics
+• Facial analysis (optional)
+
+Get personalized suggestions for:
+✓ Exercise recommendations
+✓ Stress management techniques
+✓ Lifestyle improvements
+✓ Sleep optimization
+✓ Nutrition advice
+✓ When to consult healthcare providers
+
+Configure your AI assistant to begin!
+        """
+
+        self.ai_suggestions_text.insert(tk.END, default_message)
+        self.ai_suggestions_text.config(state=tk.DISABLED)
+
+    def show_ai_config_dialog(self):
+        """Show dialog to configure Gemini API key"""
+        dialog = tk.Toplevel(self.root)
+        dialog.title("Configure Gemini AI")
+        dialog.geometry("600x400")
+        dialog.transient(self.root)
+        dialog.grab_set()
+
+        # Center the dialog
+        dialog.update_idletasks()
+        x = (dialog.winfo_screenwidth() // 2) - (dialog.winfo_width() // 2)
+        y = (dialog.winfo_screenheight() // 2) - (dialog.winfo_height() // 2)
+        dialog.geometry(f"+{x}+{y}")
+
+        main_frame = ttk.Frame(dialog, padding="20")
+        main_frame.pack(fill=tk.BOTH, expand=True)
+
+        # Title
+        title_label = ttk.Label(
+            main_frame, text="Configure Gemini AI Assistant", font=("Arial", 14, "bold")
+        )
+        title_label.pack(pady=(0, 10))
+
+        # Instructions
+        instructions = """
+To enable AI-powered health suggestions, you need a Google Gemini API key:
+
+1. Visit: https://ai.google.dev/
+2. Click "Get API key in Google AI Studio"
+3. Sign in with your Google account
+4. Create a new API key
+5. Copy and paste it below
+
+Your API key will be used to analyze your health data and provide 
+personalized recommendations using Gemini 2.5 Flash model.
+        """
+
+        instructions_label = ttk.Label(
+            main_frame, text=instructions, wraplength=500, justify=tk.LEFT
+        )
+        instructions_label.pack(pady=(0, 15))
+
+        # API Key input
+        key_frame = ttk.Frame(main_frame)
+        key_frame.pack(fill=tk.X, pady=(0, 15))
+
+        ttk.Label(key_frame, text="Gemini API Key:").pack(anchor=tk.W)
+
+        self.api_key_var = tk.StringVar()
+        api_key_entry = ttk.Entry(
+            key_frame, textvariable=self.api_key_var, show="*", width=60
+        )
+        api_key_entry.pack(fill=tk.X, pady=(5, 0))
+
+        # Show/Hide key toggle
+        self.show_key_var = tk.BooleanVar()
+        show_key_cb = ttk.Checkbutton(
+            key_frame,
+            text="Show API key",
+            variable=self.show_key_var,
+            command=lambda: api_key_entry.config(
+                show="" if self.show_key_var.get() else "*"
+            ),
+        )
+        show_key_cb.pack(anchor=tk.W, pady=(5, 0))
+
+        # Buttons
+        button_frame = ttk.Frame(main_frame)
+        button_frame.pack(fill=tk.X, pady=(15, 0))
+
+        def configure_ai():
+            api_key = self.api_key_var.get().strip()
+            if not api_key:
+                messagebox.showerror("Error", "Please enter your Gemini API key")
+                return
+
+            try:
+                self.gemini_analyzer = GeminiHealthAnalyzer(api_key)
+                if self.gemini_analyzer.configured:
+                    self.ai_status_label.config(
+                        text="AI: Gemini 2.5 Flash Ready", foreground="green"
+                    )
+                    self.ai_provider_label.config(
+                        text="Powered by: Google Gemini 2.5 Flash"
+                    )
+
+                    # Enable AI suggestion buttons if we have data
+                    if self.session_data["measurements"]:
+                        self.ai_suggest_btn.config(state=tk.NORMAL)
+                        self.refresh_ai_btn.config(state=tk.NORMAL)
+
+                    messagebox.showinfo(
+                        "Success",
+                        "Gemini AI configured successfully!\n\nYou can now get AI-powered health suggestions.",
+                    )
+                    dialog.destroy()
+                else:
+                    messagebox.showerror(
+                        "Error",
+                        "Failed to configure Gemini AI. Please check your API key.",
+                    )
+            except Exception as e:
+                messagebox.showerror("Error", f"Error configuring AI: {str(e)}")
+
+        def test_connection():
+            api_key = self.api_key_var.get().strip()
+            if not api_key:
+                messagebox.showerror("Error", "Please enter your API key first")
+                return
+
+            try:
+                test_analyzer = GeminiHealthAnalyzer(api_key)
+                if test_analyzer.configured:
+                    messagebox.showinfo(
+                        "Success", "API key is valid! Connection successful."
+                    )
+                else:
+                    messagebox.showerror(
+                        "Error", "Invalid API key or connection failed"
+                    )
+            except Exception as e:
+                messagebox.showerror("Error", f"Connection test failed: {str(e)}")
+
+        ttk.Button(button_frame, text="Test Connection", command=test_connection).pack(
+            side=tk.LEFT, padx=(0, 10)
+        )
+
+        ttk.Button(button_frame, text="Configure AI", command=configure_ai).pack(
+            side=tk.LEFT, padx=(0, 10)
+        )
+
+        ttk.Button(button_frame, text="Cancel", command=dialog.destroy).pack(
+            side=tk.RIGHT
+        )
+
+        # Focus on entry
+        api_key_entry.focus_set()
+
+    def get_ai_suggestions(self):
+        """Get AI suggestions based on current health data"""
+        if not self.session_data["measurements"]:
+            messagebox.showwarning(
+                "No Data",
+                "Please complete a monitoring session first to get AI suggestions.",
+            )
+            return
+
+        if not self.gemini_analyzer or not self.gemini_analyzer.configured:
+            messagebox.showwarning(
+                "AI Not Configured",
+                "Please configure Gemini AI first by clicking 'Configure AI'.",
+            )
+            return
+
+        # Show loading message
+        self.ai_suggestions_text.config(state=tk.NORMAL)
+        self.ai_suggestions_text.delete(1.0, tk.END)
+        self.ai_suggestions_text.insert(
+            tk.END,
+            "🤖 Analyzing your health data with AI...\n\nPlease wait while I process your measurements and generate personalized suggestions...",
+        )
+        self.ai_suggestions_text.config(state=tk.DISABLED)
+        self.root.update()
+
+        # Run AI analysis in a separate thread to prevent UI blocking
+        def run_ai_analysis():
+            try:
+                analysis_result = self.gemini_analyzer.analyze_health_data(
+                    self.results, self.current_face_image
+                )
+
+                # Update UI in main thread
+                self.root.after(0, lambda: self.display_ai_suggestions(analysis_result))
+
+            except Exception as e:
+                error_msg = f"Error getting AI suggestions: {str(e)}"
+                self.root.after(0, lambda: self.display_ai_error(error_msg))
+
+        # Start analysis in background
+        threading.Thread(target=run_ai_analysis, daemon=True).start()
+
+    def display_ai_suggestions(self, analysis_result):
+        """Display AI suggestions in the text area"""
+        self.ai_suggestions_text.config(state=tk.NORMAL)
+        self.ai_suggestions_text.delete(1.0, tk.END)
+
+        # Add header
+        header = (
+            f"🤖 AI Health Analysis - {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n"
+        )
+        header += f"Source: {analysis_result['source']}\n"
+        header += "=" * 60 + "\n\n"
+
+        self.ai_suggestions_text.insert(tk.END, header)
+        self.ai_suggestions_text.insert(tk.END, analysis_result["analysis"])
+
+        # Add footer
+        footer = f"\n\n" + "=" * 60 + "\n"
+        footer += "💡 This analysis is for educational purposes only.\n"
+        footer += "Always consult healthcare professionals for medical advice.\n"
+        footer += (
+            f"Analysis generated at: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
+        )
+
+        self.ai_suggestions_text.insert(tk.END, footer)
+        self.ai_suggestions_text.config(state=tk.DISABLED)
+
+        # Store suggestions for PDF report
+        self.ai_suggestions = analysis_result["analysis"]
+
+    def display_ai_error(self, error_msg):
+        """Display error message in AI suggestions area"""
+        self.ai_suggestions_text.config(state=tk.NORMAL)
+        self.ai_suggestions_text.delete(1.0, tk.END)
+
+        error_text = f"❌ Error getting AI suggestions\n\n{error_msg}\n\n"
+        error_text += "Please check your internet connection and API key configuration."
+
+        self.ai_suggestions_text.insert(tk.END, error_text)
+        self.ai_suggestions_text.config(state=tk.DISABLED)
 
     def setup_metrics_tab(self, parent):
         """Setup the health metrics tab with numbers and wave displays"""
@@ -216,7 +782,8 @@ class FaceVitalMonitor:
 3. Look directly at the camera and minimize movement
 4. Click "Start Monitoring (30s)" and wait for 30 seconds
 5. Keep still during the entire measurement period
-6. Generate PDF report when monitoring is complete
+6. Configure AI and get personalized health suggestions
+7. Generate PDF report when monitoring is complete
         """
 
         ttk.Label(
@@ -573,6 +1140,10 @@ class FaceVitalMonitor:
             self.face_detected = True
             face_landmarks = results.multi_face_landmarks[0]
 
+            # Store current face image for AI analysis
+            if self.monitoring_active:
+                self.current_face_image = frame.copy()
+
             self.mp_drawing.draw_landmarks(
                 frame,
                 face_landmarks,
@@ -623,7 +1194,7 @@ class FaceVitalMonitor:
         if self.monitoring_active:
             status += f" - Recording ({len(self.ppg_signal)}/900)"
 
-        self.root.title(f"Face Vital - PDF Reports Only - {status}")
+        self.root.title(f"Face Vital - AI Health Monitor - {status}")
 
         self.root.after(33, self.update_video)
 
@@ -842,6 +1413,7 @@ class FaceVitalMonitor:
 
         self.monitoring_active = True
         self.calculation_count = 0
+        self.current_face_image = None
 
         # Clear all data
         self.ppg_signal.clear()
@@ -869,6 +1441,7 @@ class FaceVitalMonitor:
         self.start_btn.config(state=tk.DISABLED)
         self.stop_btn.config(state=tk.NORMAL)
         self.pdf_btn.config(state=tk.DISABLED)
+        self.ai_suggest_btn.config(state=tk.DISABLED)
 
         self.progress_label.config(text="Starting 30-second monitoring...")
         messagebox.showinfo(
@@ -883,28 +1456,30 @@ class FaceVitalMonitor:
 
         self.start_btn.config(state=tk.NORMAL)
         self.stop_btn.config(state=tk.DISABLED)
-        self.pdf_btn.config(state=tk.NORMAL)  # Enable PDF generation
+        self.pdf_btn.config(state=tk.NORMAL)
+
+        # Enable AI suggestions if configured
+        if self.gemini_analyzer and self.gemini_analyzer.configured:
+            self.ai_suggest_btn.config(state=tk.NORMAL)
+            self.refresh_ai_btn.config(state=tk.NORMAL)
 
         self.progress["value"] = 100
         self.progress_label.config(
-            text="Monitoring completed! Ready to generate PDF report."
+            text="Monitoring completed! Ready to generate PDF report or get AI suggestions."
         )
+
+        ai_message = ""
+        if self.gemini_analyzer and self.gemini_analyzer.configured:
+            ai_message = "\n\nClick 'Get AI Suggestions' for personalized health recommendations!"
 
         messagebox.showinfo(
             "Completed",
             f"30-second monitoring completed! {self.calculation_count} calculations performed. "
-            f"You can now generate your PDF report with health metrics and wave visualizations.",
+            f"You can now generate your PDF report with health metrics and wave visualizations.{ai_message}",
         )
 
-    def save_plot_as_image(self, fig, filename):
-        """Save a matplotlib figure as an image and return the image data"""
-        buf = io.BytesIO()
-        fig.savefig(buf, format="png", dpi=150, bbox_inches="tight")
-        buf.seek(0)
-        return buf.getvalue()
-
     def generate_pdf_report(self):
-        """Generate comprehensive PDF report with all health metrics, waves, and raw signals"""
+        """Generate comprehensive PDF report with all health metrics, waves, raw signals, and AI suggestions"""
         if not self.session_data["measurements"]:
             messagebox.showwarning(
                 "No Data",
@@ -912,12 +1487,12 @@ class FaceVitalMonitor:
             )
             return
 
-        # Ask user for save location - FIXED: Use correct parameter name
+        # Ask user for save location
         filename = filedialog.asksaveasfilename(
             defaultextension=".pdf",
             filetypes=[("PDF files", "*.pdf")],
             title="Save Health Monitoring PDF Report",
-            initialfile=f"Health_Report_{datetime.now().strftime('%Y%m%d_%H%M%S')}.pdf",  # Correct parameter name
+            initialfile=f"Health_Report_{datetime.now().strftime('%Y%m%d_%H%M%S')}.pdf",
         )
 
         print("Selected:", filename)
@@ -934,7 +1509,7 @@ class FaceVitalMonitor:
 
             progress_label = ttk.Label(
                 progress_window,
-                text="Generating comprehensive PDF report with health metrics and wave visualizations...",
+                text="Generating comprehensive PDF report with health metrics and AI suggestions...",
             )
             progress_label.pack(pady=15)
 
@@ -943,7 +1518,7 @@ class FaceVitalMonitor:
             progress_bar.start()
             progress_window.update()
 
-            # ---------------- Build Story ----------------
+            # Build Story
             story = []
             styles = getSampleStyleSheet()
 
@@ -1046,6 +1621,52 @@ class FaceVitalMonitor:
             story.append(measurements_table)
             story.append(PageBreak())
 
+            # AI Suggestions Section (if available)
+            if hasattr(self, "ai_suggestions") and self.ai_suggestions:
+                story.append(
+                    Paragraph(
+                        "AI HEALTH ANALYSIS & RECOMMENDATIONS", styles["Heading2"]
+                    )
+                )
+
+                # Format AI suggestions for PDF
+                ai_text = self.ai_suggestions.replace(
+                    "**", ""
+                )  # Remove markdown formatting
+                ai_paragraphs = ai_text.split("\n\n")
+
+                for para in ai_paragraphs:
+                    if para.strip():
+                        if (
+                            para.strip().startswith("•")
+                            or "RECOMMENDATIONS:" in para
+                            or "FINDINGS:" in para
+                        ):
+                            story.append(Paragraph(para.strip(), styles["Normal"]))
+                        else:
+                            story.append(Paragraph(para.strip(), styles["Normal"]))
+                        story.append(Spacer(1, 6))
+
+                story.append(Spacer(1, 10))
+
+                # AI Disclaimer
+                ai_disclaimer_style = ParagraphStyle(
+                    "AIDisclaimer",
+                    parent=styles["Normal"],
+                    fontSize=9,
+                    textColor=colors.grey,
+                    leftIndent=20,
+                    rightIndent=20,
+                )
+                story.append(
+                    Paragraph(
+                        "AI Analysis Disclaimer: This analysis is generated by artificial intelligence and is for educational and informational purposes only. "
+                        "It should not replace professional medical advice, diagnosis, or treatment. Always consult qualified healthcare professionals for medical concerns.",
+                        ai_disclaimer_style,
+                    )
+                )
+                story.append(PageBreak())
+
             # Health Metrics Trend Analysis
             story.append(Paragraph("HEALTH METRICS TREND ANALYSIS", styles["Heading2"]))
             story.append(Spacer(1, 10))
@@ -1096,7 +1717,6 @@ class FaceVitalMonitor:
                         )
                         ax.legend()
 
-                        # FIXED: Improved image handling
                         img_buffer = io.BytesIO()
                         fig.savefig(
                             img_buffer, format="png", dpi=150, bbox_inches="tight"
@@ -1153,7 +1773,7 @@ class FaceVitalMonitor:
 
             story.append(PageBreak())
 
-            # Raw PPG
+            # Raw PPG Signal Analysis
             story.append(Paragraph("RAW SIGNAL ANALYSIS", styles["Heading2"]))
             if len(self.ppg_signal) > 10:
                 try:
@@ -1178,7 +1798,7 @@ class FaceVitalMonitor:
 
             story.append(PageBreak())
 
-            # Interpretation
+            # Traditional Health Interpretation (fallback)
             story.append(Paragraph("HEALTH INTERPRETATION", styles["Heading2"]))
             try:
                 story.append(
@@ -1190,8 +1810,8 @@ class FaceVitalMonitor:
                 )
             story.append(Spacer(1, 20))
 
-            # Recommendations
-            story.append(Paragraph("RECOMMENDATIONS", styles["Heading2"]))
+            # Traditional Recommendations (fallback)
+            story.append(Paragraph("GENERAL RECOMMENDATIONS", styles["Heading2"]))
             try:
                 story.append(Paragraph(self.get_recommendations(), styles["Normal"]))
             except:
@@ -1199,11 +1819,10 @@ class FaceVitalMonitor:
                     Paragraph("Recommendations not available.", styles["Normal"])
                 )
 
-            # ---------------- Save PDF Safely ----------------
+            # Save PDF
             try:
                 print(f"Attempting to save PDF to: {filename}")
 
-                # Ensure directory exists
                 import os
 
                 os.makedirs(
@@ -1211,7 +1830,6 @@ class FaceVitalMonitor:
                     exist_ok=True,
                 )
 
-                # Create PDF
                 doc = SimpleDocTemplate(
                     filename,
                     pagesize=A4,
@@ -1239,11 +1857,11 @@ class FaceVitalMonitor:
             progress_window.destroy()
 
             messagebox.showinfo(
-                "PDF Report Generated!", f"Report saved as:\n{filename}"
+                "PDF Report Generated!",
+                f"Comprehensive report with AI analysis saved as:\n{filename}",
             )
 
         except Exception as e:
-            # Clean up progress window
             try:
                 progress_bar.stop()
                 progress_window.destroy()
