@@ -127,14 +127,17 @@ class FaceVitalMonitor:
         self.video_label.pack()
 
         # Control buttons
+        # frame created for button creation
         button_frame = ttk.Frame(video_frame)
         button_frame.pack(pady=10)
 
+        # created start button to start monitoring
         self.start_btn = ttk.Button(
             button_frame, text="Start Monitoring (30s)", command=self.start_monitoring
         )
         self.start_btn.pack(side=tk.LEFT, padx=5)
 
+        # stop btn default disabled until start btn is pressed
         self.stop_btn = ttk.Button(
             button_frame,
             text="Stop Monitoring",
@@ -143,7 +146,7 @@ class FaceVitalMonitor:
         )
         self.stop_btn.pack(side=tk.LEFT, padx=5)
 
-        # PDF Report button - ONLY export option
+        # PDF Report button for exporting results
         self.pdf_btn = ttk.Button(
             button_frame,
             text="Generate PDF Report",
@@ -572,7 +575,7 @@ class FaceVitalMonitor:
         if results.multi_face_landmarks:
             self.face_detected = True
             face_landmarks = results.multi_face_landmarks[0]
-
+            # Draw face contour landmarks
             self.mp_drawing.draw_landmarks(
                 frame,
                 face_landmarks,
@@ -584,6 +587,7 @@ class FaceVitalMonitor:
             )
 
             if self.monitoring_active:
+                # Extract PPG signal from tiny color changes/ brightness in facial regions
                 ppg_value = self.extract_ppg_signal(frame, face_landmarks.landmark)
                 current_time = time.time()
 
